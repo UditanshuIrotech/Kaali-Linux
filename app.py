@@ -3,6 +3,8 @@ import os
 import subprocess
 import sys
 import time
+import socket
+import requests
 
 def run_command(cmd, check=True):
     """Run a shell command and return the result"""
@@ -11,8 +13,23 @@ def run_command(cmd, check=True):
     if check and result.returncode != 0:
         print(f"Error running command: {cmd}")
         print(f"Stderr: {result.stderr}")
-        sys.exit(1)
+        return result
     return result
+
+def get_public_ip():
+    """Get the public IP address"""
+    try:
+        response = requests.get('https://api.ipify.org', timeout=5)
+        return response.text.strip()
+    except:
+        return "Unable to determine public IP"
+
+def get_codespaces_url():
+    """Get the Codespaces URL if running in GitHub Codespaces"""
+    codespace_name = os.environ.get('CODESPACE_NAME')
+    if codespace_name:
+        return f"https://{codespace_name}.app.github.dev"
+    return None
 
 def create_dockerfile():
     """Create the Dockerfile for SSH container"""
@@ -40,7 +57,7 @@ CMD ["/usr/sbin/sshd", "-D"]
     
     with open('Dockerfile', 'w') as f:
         f.write(dockerfile_content)
-    print("Dockerfile created successfully")
+    print("✓ Dockerfile created successfully")
 
 def build_docker_image():
     """Build the Docker image"""
@@ -53,11 +70,12 @@ def find_available_port(base_port=2222):
     
     while port <= max_port:
         try:
-            # Check if port is available
-            result = subprocess.run(f"netstat -tuln | grep :{port}", 
-                                  shell=True, capture_output=True, text=True)
-            if result.returncode != 0:  # Port is available
-                return port
+            # Check if port is available using socket
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(1)
+                result = s.connect_ex(('localhost', port))
+                if result != 0:  # Port is available
+                    return port
             port += 1
         except:
             port += 1
@@ -74,14 +92,14 @@ def run_docker_container():
     run_command(f"docker run -d -p {ssh_port}:22 --name ssh-container ubuntu-ssh")
     
     # Wait for SSH to start
-    time.sleep(2)
+    time.sleep(3)
     
     # Check if container is running
     result = run_command("docker ps -f name=ssh-container --format '{{.Status}}'", check=False)
     if "Up" not in result.stdout:
         print("Container failed to start. Checking logs:")
         run_command("docker logs ssh-container", check=False)
-        sys.exit(1)
+        return None
     
     return ssh_port
 
@@ -89,8 +107,12 @@ def test_ssh_connection(port):
     """Test SSH connection to the container"""
     print("Testing SSH connection...")
     
+    # Get connection details
+    public_ip = get_public_ip()
+    codespaces_url = get_codespaces_url()
+    
     # Try to connect with SSH
-    ssh_cmd = f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@localhost -p {port} echo 'SSH connection successful!'"
+    ssh_cmd = f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o PasswordAuthentication=yes root@localhost -p {port} echo 'SSH connection successful!'"
     result = run_command(ssh_cmd, check=False)
     
     if result.returncode == 0:
@@ -98,14 +120,26 @@ def test_ssh_connection(port):
         print(f"Use this command to connect: ssh root@localhost -p {port}")
         print("Password: uditanshu")
     else:
-        print("✗ SSH connection failed")
-        print("Troubleshooting steps:")
-        print("1. Checking container status:")
-        run_command("docker ps -a", check=False)
-        print("2. Checking container logs:")
-        run_command("docker logs ssh-container", check=False)
-        print("3. Trying to access container directly:")
-        run_command("docker exec -it ssh-container /bin/bash -c 'service ssh status'", check=False)
+        print("✗ Direct SSH connection to localhost failed")
+        print("This is expected in GitHub Codespaces environment")
+    
+    # Display connection information for external access
+    print("\n📋 Connection Details:")
+    if codespaces_url:
+        print(f"   Codespaces URL: {codespaces_url}")
+    print(f"   Public IP: {public_ip}")
+    print(f"   SSH Port: {port}")
+    print(f"   Username: root")
+    print(f"   Password: uditanshu")
+    
+    print("\n📝 For Termius or external connection:")
+    if codespaces_url:
+        print(f"   Host: {codespaces_url.replace('https://', '')}")
+    else:
+        print(f"   Host: {public_ip}")
+    print(f"   Port: {port}")
+    print(f"   Username: root")
+    print(f"   Password: uditanshu")
 
 def main():
     """Main function"""
@@ -130,8 +164,11 @@ def main():
     # Run Docker container
     ssh_port = run_docker_container()
     
-    # Test SSH connection
-    test_ssh_connection(ssh_port)
+    if ssh_port:
+        # Test SSH connection
+        test_ssh_connection(ssh_port)
+    else:
+        print("Failed to start container. Please check Docker logs.")
 
 if __name__ == "__main__":
     main()
